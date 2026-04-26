@@ -26,7 +26,7 @@ The controller reads bottom bracket torque and cadence, computes an assist curre
 
 ![PCB render](./images/lauryno_torque_controller.png)
 
-![Finished PCB](./images/finished_pcb.jpg)
+![Finished PCB](./images/PXL_20260424_162158538.MACRO_FOCUS~2.jpg)
 
 Hardware highlights:
 
