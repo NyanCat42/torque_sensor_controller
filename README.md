@@ -4,9 +4,6 @@ This repository contains hardware and firmware for an ESP32-S3 based torque sens
 
 The controller reads bottom bracket torque and cadence, computes an assist current target, and sends motor current commands to the VESC. It also tracks odometer data with FRAM-backed persistence and exposes a local web UI for status, tuning, and OTA firmware updates.
 
-## Project Status
-
-This is an actively developed personal project used as a practical internal reference.
 
 ## Features
 
@@ -16,7 +13,7 @@ This is an actively developed personal project used as a practical internal refe
 - Wi-Fi station mode with fallback access point mode.
 - Embedded HTTP console for telemetry, runtime config, and calibration.
 - OTA firmware upload endpoint.
-- Optional TCP bridge for VESC tool connectivity over Wi-Fi.
+- TCP bridge for VESC tool connectivity over Wi-Fi.
 
 ## Repository Layout
 
@@ -64,7 +61,9 @@ Task model:
 - Communication task (HTTP + TCP bridge update loop) on core 0.
 - Main loop polls CAN and updates odometer processing.
 
-## Quick Start (Short)
+## Quick Start
+
+First flash has to be done over UART, later ones can be done OTA.
 
 1. Install PlatformIO CLI.
 2. Open terminal in `lauryno_torque_controller_software/`.
@@ -83,17 +82,12 @@ build_flags =
 pio run -e esp32-s3-devkitc-1
 ```
 
-5. Upload over USB:
+5. Upload over UART (pads at top left of board):
 
 ```bash
 pio run -e esp32-s3-devkitc-1 -t upload
 ```
 
-6. Open serial monitor:
-
-```bash
-pio device monitor -b 115200
-```
 
 ## First Boot Notes
 
@@ -101,28 +95,9 @@ pio device monitor -b 115200
 - AP SSID format: `TorqueCtrl-Setup-<chipid>`.
 - mDNS host: `lauryno-dviratis.local`.
 - HTTP console runs on port `80`.
-- VESC TCP bridge port: `65102` (off by default, can be toggled from API/UI).
+- VESC TCP bridge port: `65102` (can be toggled from API/UI).
+- **Run pedal sensor zero calibration** after installation using `POST /api/pedal/calibrate_zero`.
 
-## Runtime Configuration and API
-
-Key endpoints:
-
-- `GET /health`
-- `GET /api/vesc/status`
-- `GET /api/bridge`
-- `POST /api/bridge/enable`
-- `POST /api/bridge/disable`
-- `GET /api/odometer/status`
-- `GET /api/odometer/config`
-- `POST /api/odometer/config`
-- `GET /api/pedal/status`
-- `GET /api/pedal/config`
-- `POST /api/pedal/config`
-- `POST /api/pedal/calibrate_zero`
-
-Important operation detail:
-
-- Run pedal sensor zero calibration after installation or sensor replacement using `POST /api/pedal/calibrate_zero`.
 
 ## OTA Update
 
@@ -136,20 +111,20 @@ After a successful upload, the controller restarts automatically.
 
 ## Configuration Baseline
 
-Selected defaults from firmware config:
+Hardware pins:
 
 - CAN: TX GPIO 15, RX GPIO 7, 500000 bit/s.
-- VESC IDs: local controller `42`, target controller `69`.
 - Odometer hall input: GPIO 9.
 - FRAM I2C: SDA GPIO 6, SCL GPIO 5, base address `0x50`.
 - Torque ADC input: GPIO 1.
 - Cadence input: GPIO 2.
 
+VESC IDs: 
+
+- Local controller `42`, target controller `69` (make sure this matches the CAN ID of your VESC).
+
 See `lauryno_torque_controller_software/include/app_config.h` for the full set of constants and limits.
 
-## Testing
-
-No automated unit tests are currently implemented. The `lauryno_torque_controller_software/test/` directory is present for future PlatformIO test runner coverage.
 
 ## Open-Source License
 
