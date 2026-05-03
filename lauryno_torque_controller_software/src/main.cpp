@@ -95,6 +95,7 @@ void PedalAssistTask(void* parameter) {
 
 OtaHttpServer g_otaServer(
   AppConfig::kOtaHttpPort,
+  &g_networkManager,
   &g_vescCan,
   &g_vescTcpBridge,
   &g_odometerManager,

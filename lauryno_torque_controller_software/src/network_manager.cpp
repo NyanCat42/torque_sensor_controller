@@ -23,6 +23,19 @@ NetworkMode NetworkManager::begin() {
   return mode_;
 }
 
+bool NetworkManager::switchToAccessPoint() {
+  if (mode_ == NetworkMode::AccessPoint) {
+    return true;
+  }
+
+  WiFi.disconnect(true, true);
+  const bool started = startFallbackAp_();
+  if (started) {
+    mode_ = NetworkMode::AccessPoint;
+  }
+  return started;
+}
+
 NetworkMode NetworkManager::mode() const {
   return mode_;
 }
@@ -35,6 +48,10 @@ IPAddress NetworkManager::ipAddress() const {
 }
 
 String NetworkManager::accessPointSsid() const {
+  if (apSsid_.length() == 0) {
+    const uint32_t chipId = static_cast<uint32_t>(ESP.getEfuseMac());
+    return String(apSsidPrefix_) + "-" + String(chipId, HEX);
+  }
   return apSsid_;
 }
 
@@ -61,7 +78,7 @@ bool NetworkManager::connectToStation_() {
   return false;
 }
 
-void NetworkManager::startFallbackAp_() {
+bool NetworkManager::startFallbackAp_() {
   const uint32_t chipId = static_cast<uint32_t>(ESP.getEfuseMac());
   apSsid_ = String(apSsidPrefix_) + "-" + String(chipId, HEX);
 
@@ -78,8 +95,9 @@ void NetworkManager::startFallbackAp_() {
     Serial.printf("[NET] AP fallback ready. SSID: %s IP: %s\n",
                   apSsid_.c_str(),
                   WiFi.softAPIP().toString().c_str());
-    return;
+    return true;
   }
 
   Serial.println("[NET] Failed to start fallback AP.");
+  return false;
 }

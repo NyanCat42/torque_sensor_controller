@@ -89,10 +89,13 @@ class OdometerManager {
   mutable SemaphoreHandle_t stateMutex_;
 
   bool initialized_;
+  bool rawHallActive_;
   bool hallActive_;
   bool lastHallActive_;
   bool dirty_;
+  bool distanceDirty_;
 
+  uint32_t lastHallTransitionMs_;
   uint32_t lastObservedEdgeMs_;
   uint32_t lastAcceptedPulseMs_;
   uint32_t lastPersistMs_;

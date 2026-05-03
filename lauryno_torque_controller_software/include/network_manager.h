@@ -17,6 +17,7 @@ class NetworkManager {
                  uint32_t staConnectTimeoutMs);
 
   NetworkMode begin();
+  bool switchToAccessPoint();
 
   NetworkMode mode() const;
   IPAddress ipAddress() const;
@@ -24,7 +25,7 @@ class NetworkManager {
 
  private:
   bool connectToStation_();
-  void startFallbackAp_();
+  bool startFallbackAp_();
 
   const char* staSsid_;
   const char* staPassword_;

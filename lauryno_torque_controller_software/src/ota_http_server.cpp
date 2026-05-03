@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 #include "app_config.h"
+#include "network_manager.h"
 #include "odometer_manager.h"
 #include "pedal_assist_manager.h"
 #include "vesc_can.h"
@@ -71,16 +72,20 @@ bool ParseFloatArg(WebServer& server, const char* name, float* outValue) {
 }  // namespace
 
 OtaHttpServer::OtaHttpServer(uint16_t port,
+                             NetworkManager* networkManager,
                              VescCan* vescCan,
                              VescTcpBridge* vescTcpBridge,
                              OdometerManager* odometerManager,
                              PedalAssistManager* pedalAssistManager)
     : server_(port),
       activeIp_(0, 0, 0, 0),
+      networkManager_(networkManager),
       vescCan_(vescCan),
       vescTcpBridge_(vescTcpBridge),
       odometerManager_(odometerManager),
-      pedalAssistManager_(pedalAssistManager) {}
+      pedalAssistManager_(pedalAssistManager),
+      apSwitchPending_(false),
+      apSwitchAtMs_(0) {}
 
 void OtaHttpServer::begin(const String& networkModeLabel, const IPAddress& activeIp) {
   networkModeLabel_ = networkModeLabel;
@@ -94,6 +99,31 @@ void OtaHttpServer::begin(const String& networkModeLabel, const IPAddress& activ
 
 void OtaHttpServer::handleClient() {
   server_.handleClient();
+  processDeferredActions_();
+}
+
+void OtaHttpServer::processDeferredActions_() {
+  if (!apSwitchPending_ || !networkManager_) {
+    return;
+  }
+
+  const int32_t waitRemainingMs = static_cast<int32_t>(apSwitchAtMs_ - millis());
+  if (waitRemainingMs > 0) {
+    return;
+  }
+
+  apSwitchPending_ = false;
+
+  if (!networkManager_->switchToAccessPoint()) {
+    Serial.println("[OTA] Failed to switch into AP mode.");
+    return;
+  }
+
+  networkModeLabel_ = "AP";
+  activeIp_ = networkManager_->ipAddress();
+  Serial.printf("[OTA] Switched to AP mode. SSID: %s IP: %s\n",
+                networkManager_->accessPointSsid().c_str(),
+                activeIp_.toString().c_str());
 }
 
 void OtaHttpServer::registerRoutes_() {
@@ -104,6 +134,61 @@ void OtaHttpServer::registerRoutes_() {
   server_.on("/health", HTTP_GET, [this]() {
     String status = "{\"ok\":true,\"mode\":\"" + networkModeLabel_ + "\",\"ip\":\"" + activeIp_.toString() + "\"}";
     server_.send(200, "application/json", status);
+  });
+
+  server_.on("/api/network/status", HTTP_GET, [this]() {
+    if (!networkManager_) {
+      server_.send(503, "application/json", "{\"ok\":false,\"error\":\"network_manager_not_configured\"}");
+      return;
+    }
+
+    const NetworkMode mode = networkManager_->mode();
+    const String modeLabel = (mode == NetworkMode::Station) ? "STA" : "AP";
+    const String ip = networkManager_->ipAddress().toString();
+    const String apSsid = networkManager_->accessPointSsid();
+
+    String json = "{";
+    json += "\"ok\":true";
+    json += ",\"mode\":\"" + modeLabel + "\"";
+    json += ",\"ip\":\"" + ip + "\"";
+    json += ",\"ap_ssid\":\"" + apSsid + "\"";
+    json += "}";
+
+    server_.send(200, "application/json", json);
+  });
+
+  server_.on("/api/network/switch_to_ap", HTTP_POST, [this]() {
+    if (!networkManager_) {
+      server_.send(503, "application/json", "{\"ok\":false,\"error\":\"network_manager_not_configured\"}");
+      return;
+    }
+
+    const String apSsid = networkManager_->accessPointSsid();
+
+    if (networkManager_->mode() == NetworkMode::AccessPoint) {
+      networkModeLabel_ = "AP";
+      activeIp_ = networkManager_->ipAddress();
+
+      String json = "{";
+      json += "\"ok\":true";
+      json += ",\"already_ap\":true";
+      json += ",\"mode\":\"AP\"";
+      json += ",\"ip\":\"" + activeIp_.toString() + "\"";
+      json += ",\"ap_ssid\":\"" + apSsid + "\"";
+      json += "}";
+      server_.send(200, "application/json", json);
+      return;
+    }
+
+    apSwitchPending_ = true;
+    apSwitchAtMs_ = millis() + kApSwitchDelayMs;
+
+    String json = "{";
+    json += "\"ok\":true";
+    json += ",\"switching\":true";
+    json += ",\"ap_ssid\":\"" + apSsid + "\"";
+    json += "}";
+    server_.send(202, "application/json", json);
   });
 
   server_.on("/api/vesc/status", HTTP_GET, [this]() {
@@ -446,14 +531,17 @@ String OtaHttpServer::pageHtml_() const {
   html += "input[type=file]{display:block;margin:1rem 0;}button{padding:.55rem .9rem;border:0;border-radius:9px;background:#1565c0;color:#fff;font-weight:600;cursor:pointer;}";
   html += "button.alt{background:#00695c;}button:disabled{opacity:.6;cursor:not-allowed;}progress{width:100%;height:16px;}";
   html += "label{font-size:.82rem;color:#334;display:flex;flex-direction:column;gap:.25rem;}";
-  html += "#log{margin-top:.8rem;font-size:.95rem;color:#222;}#bridgeLog,#odoLog,#pedalLog{margin-top:.6rem;font-size:.92rem;color:#222;}";
+  html += "#log{margin-top:.8rem;font-size:.95rem;color:#222;}#networkLog,#bridgeLog,#odoLog,#pedalLog{margin-top:.6rem;font-size:.92rem;color:#222;}";
   html += "code{font-family:'IBM Plex Mono',monospace;background:#f2f6fb;padding:.1rem .3rem;border-radius:6px;}";
   html += "@media (max-width:680px){body{padding:.6rem;}h1{font-size:1.2rem;}}";
   html += "</style></head><body>";
   html += "<div class='grid'>";
   html += "<div class='card'><h1>Torque Controller Console</h1>";
-  html += "<small><strong>Mode:</strong> " + networkModeLabel_ + "</small>";
-  html += "<small><strong>Device IP:</strong> " + activeIp_.toString() + "</small>";
+  html += "<small><strong>Mode:</strong> <span id='networkMode'>" + networkModeLabel_ + "</span></small>";
+  html += "<small><strong>Device IP:</strong> <span id='deviceIp'>" + activeIp_.toString() + "</span></small>";
+  html += "<small id='apSsidRow' style='display:none'><strong>AP SSID:</strong> <span id='apSsid'>-</span></small>";
+  html += "<div class='row' style='margin-top:.7rem'><button id='switchToApBtn' class='alt' type='button'>Switch To AP Mode</button></div>";
+  html += "<div id='networkLog'></div>";
   html += "</div>";
 
   html += "<div class='card'><h2>VESC TCP Bridge</h2>";
@@ -510,6 +598,9 @@ String OtaHttpServer::pageHtml_() const {
 
   html += "<script>";
   html += "const form=document.getElementById('f');const log=document.getElementById('log');const p=document.getElementById('p');const btn=document.getElementById('btn');";
+  html += "const networkMode=document.getElementById('networkMode');const deviceIp=document.getElementById('deviceIp');";
+  html += "const apSsidRow=document.getElementById('apSsidRow');const apSsid=document.getElementById('apSsid');";
+  html += "const switchToApBtn=document.getElementById('switchToApBtn');const networkLog=document.getElementById('networkLog');";
   html += "const bridgeState=document.getElementById('bridgeState');const bridgeClient=document.getElementById('bridgeClient');";
   html += "const bridgePort=document.getElementById('bridgePort');const bridgeLog=document.getElementById('bridgeLog');const vescStatus=document.getElementById('vescStatus');";
   html += "const odometerStatus=document.getElementById('odometerStatus');const odoLog=document.getElementById('odoLog');";
@@ -521,7 +612,13 @@ String OtaHttpServer::pageHtml_() const {
   html += "const cadenceDisableRpm=document.getElementById('cadenceDisableRpm');const cadenceAverageRpm=document.getElementById('cadenceAverageRpm');";
   html += "const fastFilterAlpha=document.getElementById('fastFilterAlpha');const maxCurrentA=document.getElementById('maxCurrentA');";
   html += "const pedalCalibrateBtn=document.getElementById('pedalCalibrateBtn');";
-  html += "let bridgeEnabled=false;";
+  html += "let bridgeEnabled=false;let lastKnownApSsid='';";
+
+  html += "async function refreshNetwork(){try{const r=await fetch('/api/network/status');const d=await r.json();if(!d.ok){networkLog.textContent='Network API unavailable.';return;}";
+  html += "networkMode.textContent=d.mode||'-';deviceIp.textContent=d.ip||'-';lastKnownApSsid=d.ap_ssid||lastKnownApSsid;";
+  html += "if(lastKnownApSsid){apSsid.textContent=lastKnownApSsid;apSsidRow.style.display='block';}else{apSsidRow.style.display='none';}";
+  html += "const isAp=d.mode==='AP';switchToApBtn.disabled=isAp;if(isAp&&networkLog.textContent.indexOf('Switching')===0){networkLog.textContent='Now in AP mode.';}}";
+  html += "catch(e){networkLog.textContent='Network status error: '+e;}}";
 
   html += "async function refreshBridge(){try{const r=await fetch('/api/bridge');const d=await r.json();if(!d.ok){bridgeLog.textContent='Bridge API unavailable.';return;}";
   html += "bridgeEnabled=!!d.enabled;bridgeState.textContent=bridgeEnabled?'Bridge Enabled':'Bridge Disabled';bridgeState.style.background=bridgeEnabled?'#e8f8ef':'#fff0f0';";
@@ -567,6 +664,16 @@ String OtaHttpServer::pageHtml_() const {
   html += "try{const r=await fetch(url,{method:'POST'});const d=await r.json();bridgeLog.textContent=d.ok?('Bridge '+(d.enabled?'enabled':'disabled')):'Bridge request failed.';}";
   html += "catch(e){bridgeLog.textContent='Bridge toggle failed: '+e;}await refreshBridge();});";
 
+  html += "switchToApBtn.addEventListener('click',async()=>{";
+  html += "if(!confirm('Switch to AP mode now? Current Wi-Fi connection will drop.')){return;}";
+  html += "switchToApBtn.disabled=true;networkLog.textContent='Switching to AP mode...';";
+  html += "try{const r=await fetch('/api/network/switch_to_ap',{method:'POST'});const d=await r.json();";
+  html += "if(d.ap_ssid){lastKnownApSsid=d.ap_ssid;apSsid.textContent=lastKnownApSsid;apSsidRow.style.display='block';}";
+  html += "if(!d.ok){networkLog.textContent='AP switch failed: '+(d.error||'unknown_error');switchToApBtn.disabled=false;return;}";
+  html += "networkLog.textContent='Switch requested. Reconnect to '+(lastKnownApSsid||'the AP')+' and open http://192.168.4.1/';}";
+  html += "catch(e){networkLog.textContent='Switch requested. If this page disconnects, connect to '+(lastKnownApSsid||'the AP')+' and open http://192.168.4.1/';}";
+  html += "setTimeout(refreshNetwork,1500);});";
+
   html += "odometerConfigForm.addEventListener('submit',async(e)=>{e.preventDefault();const payload=new URLSearchParams();";
   html += "payload.append('wheel_diameter_mm',wheelDiameterMm.value);payload.append('debounce_ms',debounceMs.value);";
   html += "payload.append('persist_interval_ms',persistMs.value);payload.append('max_speed_kmh',maxSpeedKmh.value);";
@@ -599,8 +706,8 @@ String OtaHttpServer::pageHtml_() const {
   html += "log.textContent='HTTP '+xhr.status+': '+xhr.responseText;};xhr.onerror=()=>{btn.disabled=false;";
   html += "log.textContent='Upload failed due to network error.';};btn.disabled=true;";
   html += "const data=new FormData();data.append('firmware',file,file.name);xhr.send(data);});";
-  html += "refreshBridge();refreshVesc();refreshOdometer();loadOdometerConfig();refreshPedal();loadPedalConfig();";
-  html += "setInterval(()=>{refreshBridge();refreshVesc();refreshOdometer();refreshPedal();},1000);";
+  html += "refreshNetwork();refreshBridge();refreshVesc();refreshOdometer();loadOdometerConfig();refreshPedal();loadPedalConfig();";
+  html += "setInterval(()=>{refreshNetwork();refreshBridge();refreshVesc();refreshOdometer();refreshPedal();},1000);";
   html += "</script></body></html>";
 
   return html;

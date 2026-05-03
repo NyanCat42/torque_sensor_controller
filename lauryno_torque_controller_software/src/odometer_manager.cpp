@@ -4,11 +4,14 @@
 #include "fram_storage.h"
 
 #include <cmath>
+#include <cstddef>
 #include <limits>
 
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
+constexpr uint32_t kHallEdgeConfirmMs = 3;
+constexpr uint32_t kDistancePersistMinMs = 500;
 
 }  // namespace
 
@@ -26,9 +29,12 @@ OdometerManager::OdometerManager(gpio_num_t hallPin,
       config_(defaultConfig),
       stateMutex_(nullptr),
       initialized_(false),
+      rawHallActive_(false),
       hallActive_(false),
       lastHallActive_(false),
       dirty_(false),
+      distanceDirty_(false),
+      lastHallTransitionMs_(0),
       lastObservedEdgeMs_(0),
       lastAcceptedPulseMs_(0),
       lastPersistMs_(0),
@@ -52,11 +58,13 @@ bool OdometerManager::begin() {
     }
   }
 
-  pinMode(static_cast<uint8_t>(hallPin_), INPUT_PULLUP);
+  pinMode(static_cast<uint8_t>(hallPin_), INPUT);
 
   if (xSemaphoreTake(stateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
-    hallActive_ = digitalRead(static_cast<uint8_t>(hallPin_)) == LOW;
+    rawHallActive_ = digitalRead(static_cast<uint8_t>(hallPin_)) == LOW;
+    hallActive_ = rawHallActive_;
     lastHallActive_ = hallActive_;
+    lastHallTransitionMs_ = millis();
     xSemaphoreGive(stateMutex_);
   } else {
     Serial.println("[ODO] Mutex timeout during begin.");
@@ -107,19 +115,31 @@ void OdometerManager::update() {
   }
 
   const uint32_t nowMs = millis();
-  hallActive_ = digitalRead(static_cast<uint8_t>(hallPin_)) == LOW;
+  const bool rawHallActive = digitalRead(static_cast<uint8_t>(hallPin_)) == LOW;
+  if (rawHallActive != rawHallActive_) {
+    rawHallActive_ = rawHallActive;
+    lastHallTransitionMs_ = nowMs;
+  }
 
-  if (hallActive_ && !lastHallActive_) {
+  // Require the hall input to stay low for a short window to reject EMI spikes.
+  const bool hallActiveFiltered =
+      rawHallActive_ && elapsedMs_(nowMs, lastHallTransitionMs_) >= kHallEdgeConfirmMs;
+  hallActive_ = hallActiveFiltered;
+
+  if (hallActiveFiltered && !lastHallActive_) {
     processPulse_(nowMs);
   }
-  lastHallActive_ = hallActive_;
+  lastHallActive_ = hallActiveFiltered;
 
   if (speedKmh_ > 0.0f && lastAcceptedPulseMs_ != 0 && elapsedMs_(nowMs, lastAcceptedPulseMs_) > speedStaleMs_) {
     speedKmh_ = 0.0f;
   }
 
-  const bool shouldPersist =
+    const bool periodicPersistDue =
       dirty_ && config_.persistIntervalMs > 0 && elapsedMs_(nowMs, lastPersistMs_) >= config_.persistIntervalMs;
+    const bool distancePersistDue =
+      dirty_ && distanceDirty_ && elapsedMs_(nowMs, lastPersistMs_) >= kDistancePersistMinMs;
+    const bool shouldPersist = periodicPersistDue || distancePersistDue;
 
   xSemaphoreGive(stateMutex_);
 
@@ -277,6 +297,7 @@ void OdometerManager::processPulse_(uint32_t nowMs) {
   totalDistanceUm_ += distancePerPulseUm_();
   lastAcceptedPulseMs_ = nowMs;
   dirty_ = true;
+  distanceDirty_ = true;
 }
 
 bool OdometerManager::loadPersistedState_() {
@@ -289,8 +310,8 @@ bool OdometerManager::loadPersistedState_() {
     return false;
   }
 
-  const uint32_t expectedChecksum = checksum_(reinterpret_cast<const uint8_t*>(&state),
-                                              sizeof(state) - sizeof(state.checksum));
+  const uint32_t expectedChecksum =
+      checksum_(reinterpret_cast<const uint8_t*>(&state), offsetof(PersistedState, checksum));
   if (state.magic != kPersistMagic || state.version != kPersistVersion ||
       state.wheelMagnets != wheelMagnets_ || state.checksum != expectedChecksum) {
     return false;
@@ -346,6 +367,7 @@ bool OdometerManager::persistNow_() {
   if (written && xSemaphoreTake(stateMutex_, pdMS_TO_TICKS(20)) == pdTRUE) {
     lastPersistMs_ = millis();
     dirty_ = false;
+    distanceDirty_ = false;
     xSemaphoreGive(stateMutex_);
   }
 
@@ -362,7 +384,7 @@ OdometerManager::PersistedState OdometerManager::makePersistedState_() const {
   state.persistIntervalMs = config_.persistIntervalMs;
   state.maxSpeedKmh = config_.maxSpeedKmh;
   state.totalDistanceUm = totalDistanceUm_;
-  state.checksum = checksum_(reinterpret_cast<const uint8_t*>(&state), sizeof(state) - sizeof(state.checksum));
+  state.checksum = checksum_(reinterpret_cast<const uint8_t*>(&state), offsetof(PersistedState, checksum));
   return state;
 }
 

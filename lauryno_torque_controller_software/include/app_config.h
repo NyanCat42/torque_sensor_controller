@@ -47,7 +47,7 @@ constexpr uint8_t kOdometerFramBaseAddress = 0x50;
 
 constexpr uint16_t kOdometerWheelDiameterMm = 659;
 constexpr uint8_t kOdometerWheelMagnets = 1;
-constexpr uint16_t kOdometerDebounceMs = 20;
+constexpr uint16_t kOdometerDebounceMs = 35;
 constexpr uint32_t kOdometerSpeedStaleMs = 2500;
 constexpr uint32_t kOdometerPersistIntervalMs = 30000;
 constexpr float kOdometerMaxSpeedKmh = 50.0f;
